@@ -1,0 +1,226 @@
+---
+title: "Data_Science_2_Midterm"
+author: "Qimin Zhang, qz2392"
+date: "3/13/2020"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(splines)
+library(mgcv)
+library(ggplot2)
+library(ModelMetrics)
+library(gridExtra)
+```
+
+# Introduction
+
+Financial market prediction has always been a field under heat. Over the recent years, researchers, investors, and managers have dedicated in developing models for forecasting the stock market behavior. With the emerging of big data and the increase in computing power, the trend continues. One of the main challenges of stock price prediction is that they are affected by highly correlated factors, while there could be hundreds of different financial indicators. Moreover, factors such as politics, psychology, and government interference are hard to be quantified and used in the existing models. Another challenge is the incompleteness of the data, where the missing parts were denoted as NA's or 0s.
+
+The dataset used in this project is from the 2017 US stock market price with more than 4000 stocks and over 200 commonly used financial indicators. The price var [%] will be used as the response. Variable class indicates if the stock is worth-buying or not. To clarify, the reponse represents the stock price variation of year 2018: if positive, it means that the price is higher at the end of year 2018, so a buyer should consider buy the stock at the begining of 2018 and sell it for profit at the end of the year.
+
+For the highly correlated factors, we use a series of models with tuning parameters to fit the data, and adjust the parameters with cross-valiation. To deal with NA's and 0's, we romove a row if there are more than 20% NA's. After the romoval of those rows, we fill all NA's with 0's, and remove a row if there are more than 20% 0s.
+
+
+# Exploratory analysis/visualization
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+data = read_csv('2017_Financial_Data.csv') %>% 
+  janitor::clean_names() %>% 
+  rename(stock = x1, price_var = x2018_price_var_percent) %>% 
+  dplyr::select(-class) %>% 
+  dplyr::select(stock, price_var, everything())
+```
+
+Deal with NA's. Delete a row if it contains more than 20% NA's. Fill NA's with zeros, and delete a row with more than 20% 0s.
+
+```{r, echo=FALSE}
+data = data %>% 
+  mutate(nan_row = rowSums(is.na(.)), 
+         nan_row_ratio = nan_row/(length(data) - 2)) %>% 
+  filter(nan_row_ratio < 0.2) %>% 
+  mutate_if(is.numeric, ~replace(., is.na(.), 0)) %>% 
+  mutate_if(is.numeric, ~replace(., is.nan(.), 0)) %>%
+  mutate_if(is.numeric, ~replace(., is.infinite(.), 0)) %>% 
+  dplyr::select(-nan_row, -nan_row_ratio) %>% 
+  mutate(zero_row = rowSums(. == 0), 
+         zero_row_ratio = zero_row/(length(data) - 2)) %>% 
+  filter(zero_row_ratio < 0.2) %>% 
+  dplyr::select(-zero_row, -zero_row_ratio)
+```
+
+Now there are only `r nrow(data)` rows in the dataset.
+
+Since there are too many variables, we select some to find interesting structure present in the data
+
+```{r, echo=FALSE}
+theme1 <- trellis.par.get()
+theme1$plot.symbol$col = rgb(.2, .4, .2, .5) 
+theme1$plot.symbol$pch = 16
+theme1$plot.line$col = rgb(.8, .1, .1, 1) 
+theme1$plot.line$lwd = 2
+theme1$strip.background$col = rgb(.0, .2, .6, .2) 
+trellis.par.set(theme1)
+featurePlot(data %>% dplyr::select(revenue, revenue_growth, gross_profit, free_cash_flow, invested_capital, earnings_before_tax), data$price_var, plot = "scatter", labels = c("","Stock price change percentage"),
+type = c("p"), layout = c(3, 2))
+```
+
+We can see that there is no clear pattern between price change and the variables selected. Many of the variables still contain lots of 0s.
+
+# Models
+
+Split the dataset into training set and test set. Take 10% as test set.
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+set.seed(17)
+
+rowTrain = createDataPartition(y = data$price_var, p = 0.9, list = FALSE)
+train = data[rowTrain,]
+test = data[-rowTrain,]
+
+xtrain = model.matrix(price_var~., train %>% dplyr::select(-stock))[, -1]
+ytrain = train$price_var
+
+xtest = model.matrix(price_var~., test %>% dplyr::select(-stock))[, -1]
+ytest = test$price_var
+```
+
+We use ridge regression, lasso regression, elastic net, principle component regression, partial least squares and multivariate adaptive regression splines. For the model fitting, all variables are included. Tuning parameters are chosen by 10-fold cross-validation, repeated for 5 times.
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+set.seed(17)
+
+ridge_fit = train(xtrain, ytrain, method = "glmnet", 
+                  tuneGrid = expand.grid(alpha = 0,
+lambda = exp(seq(-1, 20, length=100))),
+trControl = trainControl(method = "repeatedcv", number = 10, 
+                         repeats = 5, savePredictions = "all"))
+
+ridge_plot = plot(ridge_fit, xTrans = function(x) log(x), 
+                  main = 'Ridge cross-validation', 
+                  xlab = 'log(lambda)', ylab = 'RMSE', 
+                  highlight = T)
+```
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+set.seed(17)
+
+lasso_fit = train(xtrain, ytrain, method = "glmnet", 
+                  tuneGrid = expand.grid(alpha = 1, lambda = exp(seq(0, 3, length=100))),
+trControl = trainControl(method = "repeatedcv", number = 10, repeats = 5)) 
+
+lasso_plot = plot(lasso_fit, xTrans = function(x) log(x), 
+                  main = 'Lasso cross-validation', 
+                  xlab = 'log(lambda)', ylab = 'RMSE', 
+                  highlight = T)
+```
+
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+set.seed(17)
+
+enet_fit = train(xtrain, ytrain, method = "glmnet", 
+                  tuneGrid = expand.grid(alpha = seq(0, 1, length = 20), 
+                                         lambda = exp(seq(-3, 20, length = 50))),
+trControl = trainControl(method = "repeatedcv", number = 10, repeats = 5)) 
+
+enet_plot = plot(enet_fit, xTrans = function(x) log(x), 
+                  main = 'Elastic net cross-validation', 
+                 xlab = 'log(lambda)', ylab = 'RMSE', 
+                 highlight = T)
+```
+
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+set.seed(17)
+
+pcr = train(xtrain, ytrain,
+method = "pcr", tuneGrid = data.frame(ncomp = 1:20)
+, trControl = trainControl(method = "repeatedcv", number = 10, repeats = 5),
+preProc = c("center", "scale"))
+
+pcr_plot = ggplot(pcr, highlight = T) +
+  labs(title="Principal components regression cross-validation",y = "RMSE")
+```
+
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+set.seed(17)
+
+pls = train(xtrain, ytrain,
+method = "pcr", tuneGrid = data.frame(ncomp = 1:20)
+, trControl = trainControl(method = "repeatedcv", number = 10, repeats = 5),
+preProc = c("center", "scale"))
+
+pls_plot = ggplot(pls, highlight = T) +
+  labs(title="Partial least squares cross-validation", y = "RMSE")
+```
+
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+set.seed(17)
+
+mars = train(xtrain, ytrain,
+method = "earth", tuneGrid = expand.grid(degree = 1:2, nprune = 2:20)
+, trControl = trainControl(method = "repeatedcv", number = 10, repeats = 5))
+
+mars_plot = ggplot(mars, highlight = T) +
+  labs(title="MARS cross-validation", y = "RMSE")
+```
+
+# Results
+
+```{r echo=FALSE}
+grid.arrange(ridge_plot, lasso_plot,
+             pcr_plot, pls_plot)
+
+enet_plot
+             
+mars_plot
+```
+
+
+```{r echo=FALSE}
+list(mars = mars, pls = pls, 
+                        pcr = pcr, enet = enet_fit, 
+                        lasso = lasso_fit, ridge = ridge_fit
+                        ) %>% 
+  resamples(metric = 'RMSE') %>% 
+  bwplot(metric = "RMSE", main = 'RMSE Comparison')
+```
+
+In terms of RMSE, ridge, PCR and PLS share similar results, and lasso and elastics net have similar results which are better than the previous 3 models. MARS has the best result so it's chosen to be the final model. Here is the model details:
+
+```{r, echo=FALSE}
+coef(mars$finalModel)
+```
+
+So the final model is: 
+
+Price change in percentage = 2.51 - 25.39 * h(0.6574 - gross \space margin) - 41.45 * h(0.0643 - x3y revenue growth per share - 0.68 * h(19.6039 - enterprise value over ebitda)
+
+```{r, echo=FALSE}
+mars_pred = predict(mars, xtest)
+rmse(ytest, mars_pred)
+```
+
+The RMSE on test set is `r rmse(ytest, mars_pred)`, meaning that there is `r rmse(ytest, mars_pred)`% RMSE in stock price change.
+
+# Conclusions
+
+After cross-validation, we choose MARS as our final model, while there is `r rmse(ytest, mars_pred)`% RMSE in stock price change on test set with MARS, which is not a good result. 
+
+Intuitively, we expect variables like 'revenue', 'revenue growth' or 'gross profit' remain in the model, but according to the results, these variables seem not so contributive to stock price change. We can see that all the models tend to have few viriables than 200+, or shrink the parameters to very small values. This indicates that the available predictors may not contribute a lot in the prediction of stock price change, maybe because there are too many 0's, or the predictors are highly correlated. Moreover, we can see a clear 'U-shape' in the lasso plot. 
+
+In general, the prediction of stock price change with machine learning methods still remain challenging without complete data with some key factors involved, which may not be easily collected due to highly unstable human behaviors and emotions.
